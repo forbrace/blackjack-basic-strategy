@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ast
 import dataclasses
+import inspect
 import json
 import math
 import os
@@ -11,11 +12,45 @@ import random
 import sys
 import types
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 UPCARDS: List[int] = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
+# --- Hoppe top-level demo killers ---
+BANNED_TOPLEVEL_CALLS = {
+    "monte_carlo_hand",
+    "monte_carlo_hand_cpu",
+    "monte_carlo_hand_gpu",
+    "run_simulations",
+}
+BANNED_TOPLEVEL_NAMES = {"_value", "_value_sdv", "_value_std", "_played_hands"}
+
+
+def _call_func_name(call: ast.Call) -> Optional[str]:
+    fn = call.func
+    if isinstance(fn, ast.Name):
+        return fn.id
+    if isinstance(fn, ast.Attribute):
+        return fn.attr
+    return None
+
+
+def _contains_banned_call(node: ast.AST) -> bool:
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call):
+            name = _call_func_name(n)
+            if name in BANNED_TOPLEVEL_CALLS:
+                return True
+    return False
+
+
+def _contains_banned_name(node: ast.AST) -> bool:
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name) and n.id in BANNED_TOPLEVEL_NAMES:
+            return True
+    return False
 
 
 def _install_random32_stub() -> None:
@@ -38,6 +73,12 @@ def _install_random32_stub() -> None:
 
 
 class _StripTopLevelCalls(ast.NodeTransformer):
+    """
+    Делает blackjack.py импортируемым:
+    - удаляет top-level демо/самотесты, которые запускают Monte-Carlo и Pool на import
+    - удаляет хвосты, которые зависят от временных переменных демо-блока
+    """
+
     def __init__(self) -> None:
         super().__init__()
         self._nest = 0
@@ -69,108 +110,115 @@ class _StripTopLevelCalls(ast.NodeTransformer):
         finally:
             self._exit()
 
-    def visit_Expr(self, node: ast.Expr) -> Optional[ast.AST]:
-        if self._nest > 0:
-            return node
-        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            return node
-        if isinstance(node.value, ast.Call):
+    def visit_Assert(self, node: ast.Assert) -> Optional[ast.AST]:
+        # все top-level assert (демо/self-test) не нужны для экспортера
+        if self._nest == 0:
             return None
         return node
 
-    def visit_With(self, node: ast.With) -> Optional[ast.AST]:
+    def visit_Expr(self, node: ast.Expr) -> Optional[ast.AST]:
         if self._nest > 0:
             return node
-        node2 = self.generic_visit(node)
-        assert isinstance(node2, ast.With)
-        return node2 if node2.body else None
+        # module docstring
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            return node
+        # drop any top-level call expression
+        if isinstance(node.value, ast.Call):
+            return None
+        # drop any expression referencing banned temp names
+        if _contains_banned_name(node):
+            return None
+        return node
 
-    def visit_AsyncWith(self, node: ast.AsyncWith) -> Optional[ast.AST]:
-        if self._nest > 0:
-            return node
-        node2 = self.generic_visit(node)
-        assert isinstance(node2, ast.AsyncWith)
-        return node2 if node2.body else None
+    def visit_Assign(self, node: ast.Assign) -> Optional[ast.AST]:
+        if self._nest == 0:
+            if _contains_banned_call(node) or _contains_banned_name(node):
+                return None
+        return self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> Optional[ast.AST]:
+        if self._nest == 0:
+            if _contains_banned_call(node) or _contains_banned_name(node):
+                return None
+        return self.generic_visit(node)
 
     def visit_If(self, node: ast.If) -> Optional[ast.AST]:
+        if self._nest == 0:
+            if _contains_banned_call(node) or _contains_banned_name(node):
+                return None
         node2 = self.generic_visit(node)
         assert isinstance(node2, ast.If)
         return node2 if (node2.body or node2.orelse) else None
 
     def visit_For(self, node: ast.For) -> Optional[ast.AST]:
+        if self._nest == 0:
+            if _contains_banned_call(node) or _contains_banned_name(node):
+                return None
         node2 = self.generic_visit(node)
         assert isinstance(node2, ast.For)
         return node2 if (node2.body or node2.orelse) else None
 
-    def visit_AsyncFor(self, node: ast.AsyncFor) -> Optional[ast.AST]:
-        node2 = self.generic_visit(node)
-        assert isinstance(node2, ast.AsyncFor)
-        return node2 if (node2.body or node2.orelse) else None
-
     def visit_While(self, node: ast.While) -> Optional[ast.AST]:
+        if self._nest == 0:
+            if _contains_banned_call(node) or _contains_banned_name(node):
+                return None
         node2 = self.generic_visit(node)
         assert isinstance(node2, ast.While)
         return node2 if (node2.body or node2.orelse) else None
 
-    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> Optional[ast.AST]:
-        if self._nest > 0:
-            return node
+    def visit_With(self, node: ast.With) -> Optional[ast.AST]:
+        if self._nest == 0:
+            if _contains_banned_call(node) or _contains_banned_name(node):
+                return None
         node2 = self.generic_visit(node)
-        assert isinstance(node2, ast.ExceptHandler)
+        assert isinstance(node2, ast.With)
         return node2 if node2.body else None
 
     def visit_Try(self, node: ast.Try) -> Optional[ast.AST]:
+        if self._nest == 0:
+            if _contains_banned_call(node) or _contains_banned_name(node):
+                return None
         node2 = self.generic_visit(node)
         assert isinstance(node2, ast.Try)
 
         if not node2.handlers and not node2.finalbody:
             flat = node2.body + node2.orelse
             return flat if flat else None
-
         if not node2.body and not node2.orelse and not node2.handlers and not node2.finalbody:
             return None
-
         return node2
+
 
 def _install_numba_cuda_stub() -> None:
     """
-    macOS usually has no CUDA. Hoppe's blackjack.py imports:
+    macOS обычно без CUDA. Hoppe импортирует:
       from numba import cuda
       import numba.cuda.random
-    This stub makes those imports succeed while reporting cuda.is_available() == False.
-
-    It does NOT change CPU numba usage (numba.njit / numba.jit etc).
+    Мы делаем заглушку, чтобы import проходил, но cuda.is_available() == False.
     """
-    # If numba itself isn't installed, we don't try to fake full numba here.
-    # Install numba (CPU) via pip/conda; we only stub CUDA parts.
     try:
         import numba as _numba  # type: ignore
     except Exception as e:
-        raise RuntimeError(
-            "numba is not installed (CPU). Install it first: pip install numba"
-        ) from e
-
-    import types
+        raise RuntimeError("numba is not installed. Install it: pip install numba") from e
 
     class _CudaUnsupported(RuntimeError):
         pass
 
     def _not_supported(*_a: object, **_k: object) -> None:
-        raise _CudaUnsupported("CUDA is not available in this environment (macOS).")
+        raise _CudaUnsupported("CUDA is not available in this environment.")
 
-    # ---- numba.cuda ----
     if "numba.cuda" not in sys.modules:
         cuda_mod = types.ModuleType("numba.cuda")
         cuda_mod.is_available = lambda: False  # type: ignore[attr-defined]
         cuda_mod.detect = _not_supported  # type: ignore[attr-defined]
 
-        # If blackjack.py defines GPU kernels with @cuda.jit, make it a no-op decorator
-        # so import doesn't fail. Those GPU kernels won't be used by our exporter.
         def _jit_noop(*args: object, **kwargs: object):  # noqa: ARG001
             if args and callable(args[0]) and len(args) == 1 and not kwargs:
                 return args[0]
-            def _wrap(fn):
+
+            def _wrap(fn: Any) -> Any:
                 return fn
+
             return _wrap
 
         cuda_mod.jit = _jit_noop  # type: ignore[attr-defined]
@@ -181,7 +229,6 @@ def _install_numba_cuda_stub() -> None:
         sys.modules["numba.cuda"] = cuda_mod
         setattr(_numba, "cuda", cuda_mod)
 
-    # ---- numba.cuda.random ----
     if "numba.cuda.random" not in sys.modules:
         rand_mod = types.ModuleType("numba.cuda.random")
         rand_mod.create_xoroshiro128p_states = _not_supported  # type: ignore[attr-defined]
@@ -189,9 +236,9 @@ def _install_numba_cuda_stub() -> None:
         rand_mod.xoroshiro128p_uniform_float64 = _not_supported  # type: ignore[attr-defined]
         sys.modules["numba.cuda.random"] = rand_mod
 
-        # attach as attribute for convenience
         cuda_mod2 = sys.modules["numba.cuda"]
         setattr(cuda_mod2, "random", rand_mod)
+
 
 def load_hoppe_blackjack(blackjack_py: Path, *, effort_override: Optional[int]) -> Any:
     blackjack_py = blackjack_py.resolve()
@@ -246,6 +293,7 @@ def _surrender_key(ls: bool) -> str:
 
 
 def _peek_key(obo: bool) -> str:
+    # В ключе это твой исторический ярлык.
     return "PEEK" if obo else "ENHC"
 
 
@@ -299,14 +347,75 @@ def _idx_from_pair_value(v: int) -> int:
 def _wiki_house_edge_if_available(blackjack: Any, rules: Any, strategy: Any) -> Optional[float]:
     calc_cls = getattr(blackjack, "WikipediaHouseEdgeCalculator", None)
     if calc_cls is not None:
-        return calc_cls()(rules, strategy)
+        try:
+            return float(calc_cls()(rules, strategy))
+        except Exception:
+            return None
     edge_calcs = getattr(blackjack, "EDGE_CALCULATORS", None)
     if isinstance(edge_calcs, dict) and "wiki" in edge_calcs:
-        return edge_calcs["wiki"](rules, strategy)
+        try:
+            return float(edge_calcs["wiki"](rules, strategy))
+        except Exception:
+            return None
     return None
 
 
-def export_one(blackjack: Any, rules: Any, *, compute_edge: bool, quiet: bool) -> Dict[str, Any]:
+def _prob_house_edge(blackjack: Any, rules: Any, strategy: Any, quiet: bool) -> float:
+    he = blackjack.probabilistic_house_edge(rules, strategy, quiet=quiet)
+    return float(he)
+
+
+def _call_with_supported_kwargs(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    try:
+        sig = inspect.signature(fn)
+    except Exception:
+        return fn(*args, **kwargs)
+    supported: Dict[str, Any] = {}
+    for k, v in kwargs.items():
+        if k in sig.parameters:
+            supported[k] = v
+    return fn(*args, **supported)
+
+
+def _mc_house_edge_if_available(
+    blackjack: Any,
+    rules: Any,
+    strategy: Any,
+    *,
+    mc_hands: int,
+    mc_tasks: int,
+) -> Optional[float]:
+    # 1) EDGE_CALCULATORS["mc"] если есть
+    edge_calcs = getattr(blackjack, "EDGE_CALCULATORS", None)
+    if isinstance(edge_calcs, dict) and "mc" in edge_calcs:
+        try:
+            fn = edge_calcs["mc"]
+            val = _call_with_supported_kwargs(fn, rules, strategy, num_hands=mc_hands, num_tasks=mc_tasks)
+            return float(val)
+        except Exception:
+            pass
+
+    # 2) monte_carlo_house_edge если есть
+    fn2 = getattr(blackjack, "monte_carlo_house_edge", None)
+    if callable(fn2):
+        try:
+            val2 = _call_with_supported_kwargs(fn2, rules, strategy, num_hands=mc_hands, num_tasks=mc_tasks)
+            return float(val2)
+        except Exception:
+            pass
+
+    return None
+
+
+def export_one(
+    blackjack: Any,
+    rules: Any,
+    *,
+    edge_mode: str,  # skip|auto|wiki|prob|mc
+    quiet: bool,
+    mc_hands: int,
+    mc_tasks: int,
+) -> Dict[str, Any]:
     strategy = blackjack.Strategy()
     tables = blackjack.basic_strategy_tables(rules, strategy)
 
@@ -343,20 +452,36 @@ def export_one(blackjack: Any, rules: Any, *, compute_edge: bool, quiet: bool) -
     house_edge_source: Optional[str] = None
     house_edge_prob: Optional[float] = None
 
-    if compute_edge:
-        he_wiki = _wiki_house_edge_if_available(blackjack, rules, strategy)
-        if he_wiki is not None:
-            house_edge = float(he_wiki)
-            house_edge_pct = float(he_wiki * 100.0)
-            house_edge_source = "wiki"
-        else:
-            he = blackjack.probabilistic_house_edge(rules, strategy, quiet=quiet)
+    if edge_mode != "skip":
+        if edge_mode in ("auto", "wiki"):
+            he_wiki = _wiki_house_edge_if_available(blackjack, rules, strategy)
+            if he_wiki is not None:
+                house_edge = float(he_wiki)
+                house_edge_pct = float(he_wiki * 100.0)
+                house_edge_source = "wiki"
+            elif edge_mode == "wiki":
+                house_edge = None
+                house_edge_pct = None
+                house_edge_source = "wiki-missing"
+
+        if house_edge is None and edge_mode in ("auto", "prob"):
+            he = _prob_house_edge(blackjack, rules, strategy, quiet=quiet)
             house_edge = float(he)
             house_edge_pct = float(he * 100.0)
             house_edge_source = "probabilistic"
 
+        if house_edge is None and edge_mode == "mc":
+            he_mc = _mc_house_edge_if_available(
+                blackjack, rules, strategy, mc_hands=int(mc_hands), mc_tasks=int(mc_tasks)
+            )
+            if he_mc is None:
+                raise RuntimeError("Monte-Carlo edge is not available in this blackjack.py build.")
+            house_edge = float(he_mc)
+            house_edge_pct = float(he_mc * 100.0)
+            house_edge_source = "montecarlo"
+
         try:
-            house_edge_prob = float(blackjack.probabilistic_house_edge(rules, strategy, quiet=True))
+            house_edge_prob = float(_prob_house_edge(blackjack, rules, strategy, quiet=True))
         except Exception:
             house_edge_prob = None
 
@@ -374,6 +499,8 @@ def export_one(blackjack: Any, rules: Any, *, compute_edge: bool, quiet: bool) -
             "aceUpcard": 11,
             "houseEdgeSource": house_edge_source,
             "houseEdgeProbabilistic": house_edge_prob,
+            "mcHands": int(mc_hands) if edge_mode == "mc" else None,
+            "mcTasks": int(mc_tasks) if edge_mode == "mc" else None,
         },
     }
     return payload
@@ -435,8 +562,8 @@ def _verify_export_is_correct(blackjack: Any, rules: Any, payload: Dict[str, Any
                 raise RuntimeError("VERIFY failed: meta says wiki but wikipedia calculator returned None")
             if abs(he_json - float(he_wiki)) > 1e-15:
                 raise RuntimeError(f"VERIFY failed: houseEdge(wiki) mismatch: json={he_json} expected={float(he_wiki)}")
-        else:
-            he2 = blackjack.probabilistic_house_edge(rules, strategy, quiet=quiet)
+        elif src == "probabilistic":
+            he2 = _prob_house_edge(blackjack, rules, strategy, quiet=quiet)
             if abs(he_json - float(he2)) > 1e-12:
                 raise RuntimeError(f"VERIFY failed: houseEdge(prob) mismatch: json={he_json} expected={float(he2)}")
 
@@ -503,22 +630,143 @@ def _write_payload_files(out_dir: Path, payload: Dict[str, Any]) -> None:
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _write_payload_jsonl(payload: Dict[str, Any]) -> None:
-    # canonical-ish: no indent, stable keys, compact separators
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+def _iter_tasks(args: argparse.Namespace) -> Iterator[Dict[str, Any]]:
+    # Deterministic order: same nesting, same lists.
+    # This order MUST stay stable for strict resume.
+
+    base_decks = [1.0, 2.0, 4.0, 6.0, 8.0, math.inf]
+    decks_list = _parse_decks_list(args.decks) if args.decks else base_decks
+
+    hit_soft17_list = [args.dealer17 == "H17"] if args.dealer17 else [True, False]
+    das_list = [args.das == "DAS"] if args.das else [True, False]
+    ls_list = [args.surrender == "LS"] if args.surrender else [True, False]
+    obo_list = [args.peek == "PEEK"] if args.peek else [True, False]
+    payout_list = (
+        [1.5] if args.payout == "3to2" else [1.2] if args.payout == "6to5" else [1.0]
+        if args.payout else [1.5, 1.2, 1.0]
+    )
+    dbl_list = (
+        [0] if args.doubleRule == "DBL-any" else [9] if args.doubleRule == "DBL-9-11" else [10]
+        if args.doubleRule else [0, 9, 10]
+    )
+    split_list = [_parse_split_value(args.split)] if args.split else [0.0, 2.0, 4.0, math.inf]
+    rsa_list = [args.rsa == "RSA"] if args.rsa else [False, True]
+    hsa_list = [args.hsa == "HSA"] if args.hsa else [False, True]
+    dsa_list = [args.dsa == "DSA"] if args.dsa else [False, True]
+
+    cut_card = -1 if args.cutCard is None else int(args.cutCard)
+    num_players = int(args.players) if args.players is not None else None
+
+    for num_decks in decks_list:
+        for hit_soft17 in hit_soft17_list:
+            for das in das_list:
+                for late_surrender in ls_list:
+                    for obo in obo_list:
+                        for payout in payout_list:
+                            for double_min_total in dbl_list:
+                                for split_to_num_hands in split_list:
+                                    for resplit_aces in rsa_list:
+                                        for hit_split_aces in hsa_list:
+                                            for double_split_aces in dsa_list:
+                                                d: Dict[str, Any] = {
+                                                    "num_decks": float(num_decks),
+                                                    "hit_soft17": bool(hit_soft17),
+                                                    "double_after_split": bool(das),
+                                                    "late_surrender": bool(late_surrender),
+                                                    "obo": bool(obo),
+                                                    "blackjack_payout": float(payout),
+                                                    "double_min_total": int(double_min_total),
+                                                    "split_to_num_hands": float(split_to_num_hands),
+                                                    "resplit_aces": bool(resplit_aces),
+                                                    "hit_split_aces": bool(hit_split_aces),
+                                                    "double_split_aces": bool(double_split_aces),
+                                                    "cut_card": int(cut_card),
+                                                }
+                                                if num_players is not None:
+                                                    d["num_players"] = int(num_players)
+                                                yield d
+
+
+def _strict_resume_prefix(
+    blackjack: Any,
+    base_rules: Any,
+    args: argparse.Namespace,
+    *,
+    jsonl_path: Path,
+    resume_from_line: Optional[int],
+) -> int:
+    """
+    Проверяет, что существующий jsonl — это префикс ожидаемой последовательности.
+    Возвращает индекс (кол-во строк), с которого продолжать.
+    """
+    if not jsonl_path.exists():
+        return 0
+
+    want_lines: Optional[int] = int(resume_from_line) if resume_from_line is not None else None
+    got_lines = 0
+
+    task_iter = _iter_tasks(args)
+
+    with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                obj = json.loads(line)
+                got_key = obj.get("key")
+                if not isinstance(got_key, str):
+                    raise RuntimeError("bad jsonl line: missing key")
+            except Exception as e:
+                raise RuntimeError(f"bad jsonl line at {got_lines + 1}: {e}") from e
+
+            try:
+                overrides = next(task_iter)
+            except StopIteration as e:
+                raise RuntimeError("jsonl has more lines than possible combinations") from e
+
+            rules = dataclasses.replace(base_rules, **overrides)
+            exp_key = rules_to_key(rules)
+
+            if got_key != exp_key:
+                raise RuntimeError(
+                    "resume prefix mismatch at line "
+                    f"{got_lines + 1}:\n"
+                    f"  file key: {got_key}\n"
+                    f"  exp  key: {exp_key}\n"
+                    "Stop to avoid skipping combinations."
+                )
+
+            got_lines += 1
+            if want_lines is not None and got_lines >= want_lines:
+                break
+
+    if want_lines is not None:
+        if got_lines != want_lines:
+            raise RuntimeError(f"--resume-from-line {want_lines} requested, but file has only {got_lines} usable lines.")
+        return want_lines
+
+    return got_lines
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--blackjack-py", type=Path, required=True, help="Path to hhoppe blackjack.py")
 
-    ap.add_argument("--out", type=Path, required=True, help="Output directory for --format files, or '-' for jsonl stdout.")
+    ap.add_argument("--out", type=Path, required=True, help="Output dir (files) or JSONL file path (jsonl).")
     ap.add_argument("--format", choices=["files", "jsonl"], default="files")
 
-    ap.add_argument("--edge", action="store_true")
+    ap.add_argument("--edge", choices=["skip", "auto", "wiki", "prob", "mc"], default="auto")
+    ap.add_argument("--mc-hands", type=int, default=10_000_000, help="Monte-Carlo hands (only for --edge mc).")
+    ap.add_argument("--mc-tasks", type=int, default=0, help="Monte-Carlo tasks/workers inside Hoppe (if supported).")
+
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--verify-expected", action="store_true")
+
+    ap.add_argument("--resume", action="store_true", help="Append to existing JSONL and strictly verify prefix.")
+    ap.add_argument("--resume-from-line", type=int, default=None, help="Strict resume from exact line count (prefix).")
 
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--one", action="store_true")
@@ -540,29 +788,26 @@ def main() -> None:
 
     args = ap.parse_args()
 
-    jsonl_mode = args.format == "jsonl"
-    out_is_stdout = str(args.out) == "-"
+    if args.format == "files" and args.resume:
+        raise SystemExit("--resume is only for --format jsonl")
 
-    if jsonl_mode and not out_is_stdout:
-        # still allow a path, but we do not write there in jsonl mode
-        pass
-    if (not jsonl_mode) and out_is_stdout:
-        raise SystemExit("--out '-' is only valid with --format jsonl")
+    if args.format == "files" and args.resume_from_line is not None:
+        raise SystemExit("--resume-from-line is only for --format jsonl")
+
+    if args.format == "jsonl":
+        out_path = args.out
+    else:
+        out_path = args.out
 
     effort_override = 2 if args.verify_expected else None
     blackjack = load_hoppe_blackjack(args.blackjack_py, effort_override=effort_override)
     base_rules = blackjack.Rules()
 
-    def emit(payload: Dict[str, Any]) -> None:
-        if jsonl_mode:
-            _write_payload_jsonl(payload)
-        else:
-            _write_payload_files(args.out, payload)
-
     if args.one:
+        # --one: enforce a single combination by restricting lists to exactly one value.
         decks_vals = _parse_decks_list(args.decks) if args.decks else [float(base_rules.num_decks)]
         if len(decks_vals) != 1:
-            raise SystemExit("--one requires exactly one deck value.")
+            raise SystemExit("--one requires exactly one --decks value.")
         overrides: Dict[str, Any] = {"num_decks": decks_vals[0]}
 
         overrides["cut_card"] = -1 if args.cutCard is None else int(args.cutCard)
@@ -591,71 +836,92 @@ def main() -> None:
             overrides["num_players"] = int(args.players)
 
         rules = dataclasses.replace(base_rules, **overrides)
-        payload = export_one(blackjack, rules, compute_edge=args.edge, quiet=args.quiet)
+        payload = export_one(
+            blackjack,
+            rules,
+            edge_mode=str(args.edge),
+            quiet=bool(args.quiet),
+            mc_hands=int(args.mc_hands),
+            mc_tasks=int(args.mc_tasks),
+        )
 
         if args.verify:
-            _verify_export_is_correct(blackjack, rules, payload, quiet=args.quiet)
+            _verify_export_is_correct(blackjack, rules, payload, quiet=bool(args.quiet))
         if args.verify_expected:
             _maybe_verify_expected_tables(blackjack, rules)
 
-        emit(payload)
+        if args.format == "jsonl":
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            mode = "a" if args.resume else "w"
+            with out_path.open(mode, encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+        else:
+            _write_payload_files(Path(args.out), payload)
+
         return
 
-    decks_list = _parse_decks_list(args.decks) if args.decks else [1.0, 2.0, 4.0, 6.0, 8.0, math.inf]
-    hit_soft17_list = [args.dealer17 == "H17"] if args.dealer17 else [True, False]
-    das_list = [args.das == "DAS"] if args.das else [True, False]
-    ls_list = [args.surrender == "LS"] if args.surrender else [True, False]
-    obo_list = [args.peek == "PEEK"] if args.peek else [True, False]
-    payout_list = (
-        [1.5] if args.payout == "3to2" else [1.2] if args.payout == "6to5" else [1.0]
-        if args.payout else [1.5, 1.2, 1.0]
-    )
-    dbl_list = (
-        [0] if args.doubleRule == "DBL-any" else [9] if args.doubleRule == "DBL-9-11" else [10]
-        if args.doubleRule else [0, 9, 10]
-    )
-    split_list = [_parse_split_value(args.split)] if args.split else [0.0, 2.0, 4.0, math.inf]
-    rsa_list = [args.rsa == "RSA"] if args.rsa else [False, True]
-    hsa_list = [args.hsa == "HSA"] if args.hsa else [False, True]
-    dsa_list = [args.dsa == "DSA"] if args.dsa else [False, True]
+    # --all
+    if args.format == "jsonl":
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    for num_decks in decks_list:
-        for hit_soft17 in hit_soft17_list:
-            for das in das_list:
-                for late_surrender in ls_list:
-                    for obo in obo_list:
-                        for payout in payout_list:
-                            for double_min_total in dbl_list:
-                                for split_to_num_hands in split_list:
-                                    for resplit_aces in rsa_list:
-                                        for hit_split_aces in hsa_list:
-                                            for double_split_aces in dsa_list:
-                                                overrides2: Dict[str, Any] = {
-                                                    "num_decks": num_decks,
-                                                    "hit_soft17": hit_soft17,
-                                                    "double_after_split": das,
-                                                    "late_surrender": late_surrender,
-                                                    "obo": obo,
-                                                    "blackjack_payout": payout,
-                                                    "double_min_total": double_min_total,
-                                                    "split_to_num_hands": split_to_num_hands,
-                                                    "resplit_aces": resplit_aces,
-                                                    "hit_split_aces": hit_split_aces,
-                                                    "double_split_aces": double_split_aces,
-                                                }
-                                                overrides2["cut_card"] = -1 if args.cutCard is None else int(args.cutCard)
-                                                if args.players is not None:
-                                                    overrides2["num_players"] = int(args.players)
+        start_index = 0
+        if args.resume:
+            start_index = _strict_resume_prefix(
+                blackjack,
+                base_rules,
+                args,
+                jsonl_path=out_path,
+                resume_from_line=args.resume_from_line,
+            )
+            print(f"[resume] prefix ok, continuing from line {start_index + 1}", file=sys.stderr)
 
-                                                rules2 = dataclasses.replace(base_rules, **overrides2)
-                                                payload2 = export_one(blackjack, rules2, compute_edge=args.edge, quiet=args.quiet)
+        file_mode = "a" if args.resume else "w"
+        with out_path.open(file_mode, encoding="utf-8") as f:
+            idx = 0
+            for overrides in _iter_tasks(args):
+                if idx < start_index:
+                    idx += 1
+                    continue
 
-                                                if args.verify:
-                                                    _verify_export_is_correct(blackjack, rules2, payload2, quiet=args.quiet)
-                                                if args.verify_expected:
-                                                    _maybe_verify_expected_tables(blackjack, rules2)
+                rules = dataclasses.replace(base_rules, **overrides)
+                payload = export_one(
+                    blackjack,
+                    rules,
+                    edge_mode=str(args.edge),
+                    quiet=bool(args.quiet),
+                    mc_hands=int(args.mc_hands),
+                    mc_tasks=int(args.mc_tasks),
+                )
 
-                                                emit(payload2)
+                if args.verify:
+                    _verify_export_is_correct(blackjack, rules, payload, quiet=bool(args.quiet))
+                if args.verify_expected:
+                    _maybe_verify_expected_tables(blackjack, rules)
+
+                f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+                idx += 1
+
+        return
+
+    # files mode
+    out_dir = Path(args.out)
+    for overrides in _iter_tasks(args):
+        rules = dataclasses.replace(base_rules, **overrides)
+        payload = export_one(
+            blackjack,
+            rules,
+            edge_mode=str(args.edge),
+            quiet=bool(args.quiet),
+            mc_hands=int(args.mc_hands),
+            mc_tasks=int(args.mc_tasks),
+        )
+
+        if args.verify:
+            _verify_export_is_correct(blackjack, rules, payload, quiet=bool(args.quiet))
+        if args.verify_expected:
+            _maybe_verify_expected_tables(blackjack, rules)
+
+        _write_payload_files(out_dir, payload)
 
 
 if __name__ == "__main__":

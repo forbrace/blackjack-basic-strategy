@@ -43,11 +43,13 @@ python export_tables_prob.py \
 ### Simulation
 export_tables_sim.py
 ```
-python -u export_tables_sim.py \
---blackjack-py ./blackjack.py \
---all --edge --quiet \
---format jsonl --out - \
-> ./tables_sim.jsonl
+EFFORT=2 python export_tables_sim.py \
+  --blackjack-py ./blackjack.py \
+  --format jsonl \
+  --out ./tables_sim.jsonl \
+  --all \
+  --edge auto \
+  --resume
 ```
 
 ## DB generation
