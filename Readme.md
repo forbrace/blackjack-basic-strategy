@@ -1,6 +1,6 @@
-# Blackjack strategy tables generator
+# Blackjack strategy table generator
 
-This app generates Blackjack strategy tables based on [bjnb: Blackjack Notebook](https://github.com/hhoppe/blackjack) and is developed for [app.21logic.com](https://app.21logic.com).
+This app generates Blackjack basic strategy tables based on [bjnb: Blackjack Notebook](https://github.com/hhoppe/blackjack) and is developed for [app.21logic.com](https://app.21logic.com).
 
 ## How-to
 
