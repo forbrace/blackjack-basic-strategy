@@ -1,6 +1,6 @@
 # Blackjack strategy table generator
 
-This app generates Blackjack basic strategy tables based on [bjnb: Blackjack Notebook](https://github.com/hhoppe/blackjack) and is developed for [app.21logic.com](https://app.21logic.com).
+This app generates Blackjack basic strategy tables based on [bjnb: Blackjack Notebook](https://github.com/hhoppe/blackjack). Simple viewer app: [app.21logic.com](https://app.21logic.com).
 
 ## How-to
 
@@ -25,7 +25,7 @@ python -m pip install hhoppe-tools matplotlib more-itertools numba numpy tqdm
 git clone https://github.com/hhoppe/blackjack.git
 ```
 
-### Probabilistic analysis
+### Probabilistic analysis (effort 1)
 export_tables_prob.py
 ```
 python export_tables_prob.py \
@@ -40,16 +40,16 @@ python export_tables_prob.py \
 --progress-every 500
 ```
 
-### Simulation
+### Probabilistic analysis (effort 3)
 export_tables_sim.py
 ```
-EFFORT=2 python export_tables_sim.py \
+EFFORT=3 python export_hoppe_tables_v3_resume.py \
   --blackjack-py ./blackjack.py \
   --format jsonl \
-  --out ./tables_sim.jsonl \
+  --out ./hoppe_tables_resume_3.jsonl \
   --all \
   --edge auto \
-  --resume
+  --effort 3 --resume
 ```
 
 ## DB generation

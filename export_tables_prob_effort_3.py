@@ -74,9 +74,9 @@ def _install_random32_stub() -> None:
 
 class _StripTopLevelCalls(ast.NodeTransformer):
     """
-    Делает blackjack.py импортируемым:
-    - удаляет top-level демо/самотесты, которые запускают Monte-Carlo и Pool на import
-    - удаляет хвосты, которые зависят от временных переменных демо-блока
+    Makes blackjack.py importable:
+       - removes top-level demo/self-tests that run Monte-Carlo and Pool on import
+       - removes tails that depend on demo block temporary variables
     """
 
     def __init__(self) -> None:
@@ -111,7 +111,7 @@ class _StripTopLevelCalls(ast.NodeTransformer):
             self._exit()
 
     def visit_Assert(self, node: ast.Assert) -> Optional[ast.AST]:
-        # все top-level assert (демо/self-test) не нужны для экспортера
+        # all top-level assert (demo/self-test) are not needed for the exporter
         if self._nest == 0:
             return None
         return node
@@ -191,10 +191,10 @@ class _StripTopLevelCalls(ast.NodeTransformer):
 
 def _install_numba_cuda_stub() -> None:
     """
-    macOS обычно без CUDA. Hoppe импортирует:
-      from numba import cuda
-      import numba.cuda.random
-    Мы делаем заглушку, чтобы import проходил, но cuda.is_available() == False.
+    macOS usually does not have CUDA. Hoppe imports:
+          from numba import cuda
+          import numba.cuda.random
+    We create a placeholder so that the import works, but cuda.is_available() == False.
     """
     try:
         import numba as _numba  # type: ignore
@@ -293,7 +293,7 @@ def _surrender_key(ls: bool) -> str:
 
 
 def _peek_key(obo: bool) -> str:
-    # В ключе это твой исторический ярлык.
+    # In the key, this is your historical label.
     return "PEEK" if obo else "ENHC"
 
 
@@ -385,7 +385,7 @@ def _mc_house_edge_if_available(
     mc_hands: int,
     mc_tasks: int,
 ) -> Optional[float]:
-    # 1) EDGE_CALCULATORS["mc"] если есть
+        # 1) EDGE_CALCULATORS[‘mc’] if available
     edge_calcs = getattr(blackjack, "EDGE_CALCULATORS", None)
     if isinstance(edge_calcs, dict) and "mc" in edge_calcs:
         try:
@@ -395,7 +395,7 @@ def _mc_house_edge_if_available(
         except Exception:
             pass
 
-    # 2) monte_carlo_house_edge если есть
+    # 2) monte_carlo_house_edge if available
     fn2 = getattr(blackjack, "monte_carlo_house_edge", None)
     if callable(fn2):
         try:
@@ -754,6 +754,14 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--blackjack-py", type=Path, required=True, help="Path to hhoppe blackjack.py")
 
+    ap.add_argument(
+        "--effort",
+        type=int,
+        choices=[0, 1, 2, 3],
+        default=None,
+        help="Hoppe EFFORT (overrides env; higher = more accurate, slower).",
+    )
+
     ap.add_argument("--out", type=Path, required=True, help="Output dir (files) or JSONL file path (jsonl).")
     ap.add_argument("--format", choices=["files", "jsonl"], default="files")
 
@@ -799,7 +807,9 @@ def main() -> None:
     else:
         out_path = args.out
 
-    effort_override = 2 if args.verify_expected else None
+#     effort_override = 2 if args.verify_expected else None
+#     blackjack = load_hoppe_blackjack(args.blackjack_py, effort_override=effort_override)
+    effort_override = int(args.effort) if args.effort is not None else (2 if args.verify_expected else None)
     blackjack = load_hoppe_blackjack(args.blackjack_py, effort_override=effort_override)
     base_rules = blackjack.Rules()
 
