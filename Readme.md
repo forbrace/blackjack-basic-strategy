@@ -26,11 +26,10 @@ git clone https://github.com/hhoppe/blackjack.git
 ```
 
 ### Probabilistic analysis (effort 1)
-export_tables_prob.py
 ```
-python export_tables_prob.py \
+python export_tables_prob_effort_1.py \
 --blackjack-py ./blackjack.py \
---out ./tables_prob.jsonl \
+--out ./tables_effort_1.jsonl \
 --all \
 --edge auto \
 --effort 1 \
@@ -41,14 +40,14 @@ python export_tables_prob.py \
 ```
 
 ### Probabilistic analysis (effort 3)
-export_tables_sim.py
 ```
-EFFORT=3 python export_hoppe_tables_v3_resume.py \
+EFFORT=3 python export_tables_prob_effort_3.py \
   --blackjack-py ./blackjack.py \
   --format jsonl \
-  --out ./hoppe_tables_resume_3.jsonl \
+  --out ./tables_effort_3.jsonl \
   --all \
-  --edge auto \
+  --edge prob \
+  --verify \
   --effort 3 --resume
 ```
 

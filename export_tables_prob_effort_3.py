@@ -385,7 +385,7 @@ def _mc_house_edge_if_available(
     mc_hands: int,
     mc_tasks: int,
 ) -> Optional[float]:
-        # 1) EDGE_CALCULATORS[‘mc’] if available
+    # 1) EDGE_CALCULATORS["mc"] if available
     edge_calcs = getattr(blackjack, "EDGE_CALCULATORS", None)
     if isinstance(edge_calcs, dict) and "mc" in edge_calcs:
         try:
@@ -544,15 +544,22 @@ def _verify_export_is_correct(blackjack: Any, rules: Any, payload: Dict[str, Any
     for name in ("hard", "soft", "pair"):
         got = restored[name]
         exp = tables[name]
-        if got.shape != exp.shape:
-            raise RuntimeError(f"VERIFY failed: shape mismatch for {name}: {got.shape} vs {exp.shape}")
-        if not np.array_equal(got, exp):
-            diff = np.argwhere(got != exp)
+
+        # Normalize both sides to string arrays to avoid dtype/enum/object mismatch.
+        got_s = got.astype(str)
+        exp_s = np.asarray(exp).astype(str)
+
+        if got_s.shape != exp_s.shape:
+            raise RuntimeError(f"VERIFY failed: shape mismatch for {name}: {got_s.shape} vs {exp_s.shape}")
+
+        if not np.array_equal(got_s, exp_s):
+            diff = np.argwhere(got_s != exp_s)
             i, j = diff[0].tolist()
             raise RuntimeError(
-                f"VERIFY failed: table '{name}' mismatch at [{i},{j}]: got={got[i,j]!r} expected={exp[i,j]!r}"
+                f"VERIFY failed: table '{name}' mismatch at [{i},{j}]: got={got_s[i,j]!r} expected={exp_s[i,j]!r}"
             )
 
+    # Keep houseEdge verification only if present and requested in payload.
     if payload.get("houseEdge") is not None:
         he_json = float(payload["houseEdge"])
         src = str(payload.get("meta", {}).get("houseEdgeSource") or "")
@@ -749,6 +756,60 @@ def _strict_resume_prefix(
 
     return got_lines
 
+def _verify_existing_jsonl(
+    blackjack: Any,
+    base_rules: Any,
+    args: argparse.Namespace,
+    *,
+    jsonl_path: Path,
+    quiet: bool,
+) -> int:
+    if not jsonl_path.exists():
+        return 0
+
+    task_iter = _iter_tasks(args)
+    checked = 0
+    record_no = 0  # counts non-empty JSON records
+
+    with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+
+            record_no += 1
+
+            try:
+                obj = json.loads(line)
+            except Exception as e:
+                raise RuntimeError(f"bad jsonl at file line {line_no} (record {record_no}): {e}") from e
+
+            got_key = obj.get("key")
+            if not isinstance(got_key, str):
+                raise RuntimeError(f"bad jsonl at file line {line_no} (record {record_no}): missing key")
+
+            try:
+                overrides = next(task_iter)
+            except StopIteration as e:
+                raise RuntimeError("jsonl has more records than possible combinations") from e
+
+            rules = dataclasses.replace(base_rules, **overrides)
+            exp_key = rules_to_key(rules)
+            if got_key != exp_key:
+                raise RuntimeError(
+                    f"VERIFY-EXISTING failed at file line {line_no} (record {record_no}):\n"
+                    f"  file key: {got_key}\n"
+                    f"  exp  key: {exp_key}"
+                )
+
+            # Verify tables only; do not require houseEdge reproducibility.
+            obj2 = dict(obj)
+            obj2["houseEdge"] = None
+            _verify_export_is_correct(blackjack, rules, obj2, quiet=quiet)
+
+            checked += 1
+
+    return checked
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -772,6 +833,8 @@ def main() -> None:
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--verify-expected", action="store_true")
+    ap.add_argument("--verify-existing", action="store_true",
+                help="Verify existing JSONL lines (keys + tables) before continuing.")
 
     ap.add_argument("--resume", action="store_true", help="Append to existing JSONL and strictly verify prefix.")
     ap.add_argument("--resume-from-line", type=int, default=None, help="Strict resume from exact line count (prefix).")
@@ -873,6 +936,12 @@ def main() -> None:
     # --all
     if args.format == "jsonl":
         out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if args.verify_existing:
+            n = _verify_existing_jsonl(
+                blackjack, base_rules, args, jsonl_path=out_path, quiet=bool(args.quiet)
+            )
+            print(f"[verify-existing] ok: {n} lines", file=sys.stderr)
 
         start_index = 0
         if args.resume:
