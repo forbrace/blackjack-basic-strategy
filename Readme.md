@@ -4,7 +4,7 @@ This repository generates **blackjack basic strategy tables** for many rule comb
 
 The tables are produced using the [bjnb: Blackjack Notebook](https://github.com/hhoppe/blackjack) engine (from `hhoppe/blackjack`), which computes optimal basic-strategy action tables under different blackjack rules. 
 
-A simple viewer app for these tables is available at [app.21logic.com](https://app.21logic.com).
+A simple viewer app for these tables is available at [21logic.com](https://21logic.com).
 
 
 ## What you get in the end
@@ -117,7 +117,7 @@ This produces a SQL file you can import into your DB (schema/DDL details are def
 
 ## app.21logic.com (viewer) — short overview
 
-This repo links to app.21logic.com as a “simple viewer app” for the generated tables.
+This repo links to 21logic.com as a “simple viewer app” for the generated tables.
 
 In practice, this is where the exported tables become user-facing:
 - pick a ruleset (or a “rule pack”),
@@ -126,7 +126,7 @@ In practice, this is where the exported tables become user-facing:
 
 ### Example charts
 
-![Hard/Soft/Pairs example](https://app.21logic.com/images/blackjack_-6d,-h17,-das,-ls,-obo,-3_2,-dbl-any,-split-4,-nrsa,-nhsa,-ndsa,-cut-234,-p1-strategy.png)
+![Hard/Soft/Pairs example](https://21logic.com/images/blackjack_-6d,-h17,-das,-ls,-obo,-3_2,-dbl-any,-split-4,-nrsa,-nhsa,-ndsa,-cut-234,-p1-strategy.png)
 
 
 ## Notes
